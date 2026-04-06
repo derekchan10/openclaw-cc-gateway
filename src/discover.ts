@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { Tenant } from "./config.js";
@@ -61,20 +61,44 @@ export function discoverInstances(): DiscoveredInstance[] {
     }
   } catch { /* Docker not available */ }
 
-  // 2. Local openclaw
+  // 2. Local openclaw installations
+  //    Detect default ~/.openclaw and any ~/.openclaw-<profile> directories
   try {
     execSync("which openclaw", { encoding: "utf8", timeout: 3000 });
-    const localName = "local";
-    if (!instances.some((i) => i.name === localName)) {
+    const home = process.env.HOME || "/tmp";
+
+    // Default local instance
+    const defaultConfigDir = resolve(home, ".openclaw");
+    if (existsSync(defaultConfigDir) && !instances.some((i) => i.configDir === defaultConfigDir)) {
       instances.push({
-        name: localName,
+        name: "local",
         container: "",
         port: 0,
-        configDir: resolve(process.env.HOME || "/tmp", ".openclaw"),
+        configDir: defaultConfigDir,
         mode: "local",
       });
     }
-  } catch { /* not installed */ }
+
+    // Profile-based instances: ~/.openclaw-<name>
+    try {
+      for (const entry of readdirSync(home)) {
+        const match = entry.match(/^\.openclaw-(.+)$/);
+        if (!match) continue;
+        const profileName = match[1];
+        const profileDir = resolve(home, entry);
+        if (!statSync(profileDir).isDirectory()) continue;
+        // Skip if already discovered as a Docker instance (has same configDir)
+        if (instances.some((i) => i.configDir === profileDir)) continue;
+        instances.push({
+          name: profileName,
+          container: "",
+          port: 0,
+          configDir: profileDir,
+          mode: "local",
+        });
+      }
+    } catch { /* ignore readdir errors */ }
+  } catch { /* openclaw not installed */ }
 
   return instances;
 }
