@@ -108,15 +108,15 @@ function handleStream(
       resolve();
     };
 
-    // Safety timeout: 10 minutes max
+    // Safety timeout: CLI timeout + 30s
     const safetyTimer = setTimeout(() => {
       if (!resolved) {
-        console.error(`[${tenantName}] Safety timeout (10min), forcing cleanup`);
+        console.error(`[${tenantName}] Safety timeout, forcing cleanup`);
         sub.kill();
         if (!res.writableEnded) res.end();
         done("safety-timeout");
       }
-    }, 600_000);
+    }, config.cli.timeout + 30_000);
 
     const t0 = Date.now();
     const ts = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
@@ -261,7 +261,7 @@ function handleNonStream(
         sendResponse();
         done("safety-timeout");
       }
-    }, 600_000);
+    }, config.cli.timeout + 30_000);
 
     // Track per-turn state, reset on each message_start
     let contentBlocks: unknown[] = [];
