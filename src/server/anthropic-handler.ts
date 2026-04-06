@@ -130,6 +130,7 @@ function handleStream(
       env: tenant?.env,
       tenantName,
       skillsDir: config.skills.dir,
+      effort: config.cli.effort,
     });
 
     // Send SSE headers immediately
@@ -251,6 +252,7 @@ function handleNonStream(
       env: tenant?.env,
       tenantName,
       skillsDir: config.skills.dir,
+      effort: config.cli.effort,
     });
 
     // Safety timeout: 10 minutes

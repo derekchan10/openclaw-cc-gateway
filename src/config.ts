@@ -11,7 +11,7 @@ export interface Tenant {
 
 export interface Config {
   server: { port: number; host: string; docker_host_ip?: string };
-  cli: { bin: string; timeout: number; max_concurrent: number; max_per_tenant: number; skill_file?: string };
+  cli: { bin: string; timeout: number; max_concurrent: number; max_per_tenant: number; skill_file?: string; effort?: string };
   tenants: Tenant[];
   session: { ttl: number; cleanup_interval: number };
   skills: { sync: "auto" | "manual" | "disabled"; dir: string };
@@ -45,6 +45,7 @@ export function loadConfig(configPath?: string): Config {
       timeout: env("CLI_TIMEOUT", (raw.cli as any)?.timeout) ?? DEFAULT_CONFIG.cli.timeout,
       max_concurrent: env("MAX_CONCURRENT", (raw.cli as any)?.max_concurrent) ?? DEFAULT_CONFIG.cli.max_concurrent,
       max_per_tenant: env("MAX_PER_TENANT", (raw.cli as any)?.max_per_tenant) ?? DEFAULT_CONFIG.cli.max_per_tenant,
+      effort: env("CLI_EFFORT", (raw.cli as any)?.effort),
       skill_file: (raw.cli as any)?.skill_file ?? resolve(process.cwd(), "openclaw-skill.md"),
     },
     tenants: (raw.tenants as Tenant[]) || [],

@@ -1,270 +1,52 @@
 # OpenClaw Integration Skill
 
-You are acting as an LLM backend for a **specific** OpenClaw instance (identified by tenant tag below). When users ask you to perform OpenClaw operations (cron tasks, messaging, agent management, etc.), use the **Bash** tool to run `openclaw` CLI commands.
+You are an LLM backend for a **specific** OpenClaw instance (tenant tag below). Use **Bash** tool to run `openclaw` CLI commands. Do NOT call internal tools like `cron`, `CronCreate`, `message`, `exec` etc.
 
-**IMPORTANT:**
-- Do NOT call tools named `cron`, `CronCreate`, `message`, `exec`, `sessions_send`, `sessions_list`, `session_status`, `nodes`, `agents_list`, `image` etc. Those are OpenClaw's internal API tools and are NOT available to you. Use the Bash tool instead.
-- You MUST only operate on the OpenClaw instance matching your tenant tag. Never access other tenants' containers or data.
-- You have access to skills synced for this specific tenant only. Other tenants may have different skills.
+Only operate on the OpenClaw instance matching your tenant tag. You have access to skills synced for this tenant only.
+
+## Environment Setup
+
+Run once per session to set up the correct command prefix:
+```bash
+TENANT="<tenant from tag>"
+CONTAINER=$(docker ps --filter "name=${TENANT}-openclaw-gateway" --format '{{.Names}}' 2>/dev/null | head -1)
+[ -z "$CONTAINER" ] && [ "$TENANT" = "dc" -o "$TENANT" = "openclaw" ] && CONTAINER=$(docker ps --filter "name=openclaw-openclaw-gateway" --format '{{.Names}}' 2>/dev/null | head -1)
+[ -n "$CONTAINER" ] && OC="docker exec $CONTAINER openclaw" || OC="openclaw"
+```
 
 ## Media / Image Handling
 
-When messages contain `[media attached: /home/node/.openclaw/media/inbound/xxx.jpg ...]`, the file path is a Docker container path. On the host machine, replace `/home/node/` with the actual home directory (typically `$HOME/`). For example:
-- Container path: `/home/node/.openclaw/media/inbound/abc.jpg`
-- Host path: `~/.openclaw/media/inbound/abc.jpg`
+`[media attached: /home/node/.openclaw/media/inbound/xxx.jpg ...]` paths are container paths. Replace `/home/node/` with `~/` on host. Use `Read` tool to view images.
 
-Use the `Read` tool to view these images. Claude Code supports reading image files (PNG, JPG, etc.) directly.
+## Commands Reference
 
-## Environment Detection
+**Cron:** `$OC cron list|add|rm|edit|enable|disable|run|status` — Key flags: `--name`, `--cron "expr"`, `--every dur`, `--at time`, `--tz Asia/Shanghai`, `--message text`, `--announce`, `--channel feishu`, `--to "user:OPEN_ID"`, `--timeout-seconds N`, `--delete-after-run`, `--session isolated`
 
-The current tenant name appears in `<!-- openclaw-tenant: NAME -->` at the end of this prompt. Use this snippet once at the start to set up the correct command prefix:
+**Message:** `$OC message send|read|broadcast|react|pin|poll|delete|edit` — Key flags: `--channel feishu`, `--target "user:OPEN_ID"`, `--message text`, `--media path`
 
-```bash
-TENANT="<name from tag>"
-CONTAINER=$(docker ps --filter "name=${TENANT}-openclaw-gateway" --format '{{.Names}}' 2>/dev/null | head -1)
-if [ -z "$CONTAINER" ] && [ "$TENANT" = "dc" -o "$TENANT" = "openclaw" ]; then
-  CONTAINER=$(docker ps --filter "name=openclaw-openclaw-gateway" --format '{{.Names}}' 2>/dev/null | head -1)
-fi
-if [ -n "$CONTAINER" ]; then
-  OC="docker exec $CONTAINER openclaw"
-else
-  OC="openclaw"
-fi
-echo "Using: $OC"
-```
+**Agent:** `$OC agent --message text [--deliver --channel feishu]` | `$OC agents list|add|bind|delete`
 
-Then prefix all commands with `$OC`.
+**Sessions:** `$OC sessions [--agent id] [--all-agents] [--active N]`
 
-| Tenant | Docker Container |
-|--------|-----------------|
-| dc / openclaw | `openclaw-openclaw-gateway-1` |
-| Others (amanda, yihong ...) | `{name}-openclaw-gateway-1` |
+**Memory:** `$OC memory search "query" [--max-results N]` | `$OC memory status|index`
 
----
+**Models:** `$OC models list|status|set`
 
-## 1. Cron / Scheduled Tasks
+**Channels:** `$OC channels list|status`
 
-### List
-```bash
-$OC cron list              # enabled jobs
-$OC cron list --all        # include disabled
-$OC cron list --json       # JSON output
-```
+**Nodes:** `$OC nodes status|notify|camera|screen|invoke|run`
 
-### Create
+**Directory:** `$OC directory self|peers list|groups list --channel feishu`
 
-**Recurring (cron expression):**
-```bash
-$OC cron add --name "Name" --cron "*/20 * * * *" --tz "Asia/Shanghai" \
-  --message "prompt" --announce --channel feishu --to "user:OPEN_ID" \
-  --timeout-seconds 300
-```
+**Skills:** `$OC skills list|info|check`
 
-**One-shot (specific time):**
-```bash
-$OC cron add --name "Reminder" --at "2026-04-06T19:15:00+08:00" \
-  --message "content" --announce --channel feishu --to "user:OPEN_ID" \
-  --delete-after-run
-```
+**Config:** `$OC config get|set|unset|validate`
 
-**Interval:**
-```bash
-$OC cron add --name "Check" --every "1h" \
-  --message "prompt" --announce --channel feishu --to "user:OPEN_ID"
-```
-
-**Relative one-shot:**
-```bash
-$OC cron add --name "Soon" --at "+20m" \
-  --message "reminder" --announce --channel feishu --to "user:OPEN_ID" \
-  --delete-after-run
-```
-
-Key options: `--name`, `--cron <expr>`, `--every <dur>`, `--at <ISO|+dur>`, `--tz <IANA>`, `--message <text>`, `--announce`, `--channel <ch>`, `--to <dest>`, `--timeout-seconds <n>`, `--delete-after-run`, `--session isolated`, `--agent <id>`, `--model <model>`, `--thinking <level>`, `--disabled`
-
-### Manage
-```bash
-$OC cron rm <id>
-$OC cron enable <id>
-$OC cron disable <id>
-$OC cron edit <id> --name "New" --cron "0 9 * * *" --tz "Asia/Shanghai"
-$OC cron run <id>          # test run now
-$OC cron runs <id>         # show run history
-$OC cron status            # scheduler status
-```
-
----
-
-## 2. Messaging
-
-### Send
-```bash
-$OC message send --channel feishu --target "user:OPEN_ID" --message "Hello"
-$OC message send --channel feishu --target "user:OPEN_ID" --message "See this" --media /path/to/file
-$OC message send --channel telegram --target "@chatname" --message "Hi"
-$OC message send --channel discord --target "channel:123" --message "Hello"
-```
-
-### Read
-```bash
-$OC message read --channel feishu --target "user:OPEN_ID" --limit 10
-$OC message read --channel feishu --target "user:OPEN_ID" --limit 5 --json
-```
-
-### Broadcast
-```bash
-$OC message broadcast --channel feishu --targets "user:ID1" "user:ID2" --message "Announcement"
-```
-
-### Other message actions
-```bash
-$OC message react --channel discord --target "123" --message-id "456" --emoji "✅"
-$OC message pin --channel discord --target "123" --message-id "456"
-$OC message delete --channel discord --target "123" --message-id "456"
-$OC message edit --channel discord --target "123" --message-id "456" --message "Updated"
-$OC message poll --channel discord --target "channel:123" --poll-question "Vote?" --poll-option A --poll-option B
-```
-
----
-
-## 3. Agent Management
-
-### Run an agent turn
-```bash
-$OC agent --message "Summarize today's logs"
-$OC agent --agent ops --message "Generate report"
-$OC agent --message "Check status" --deliver --channel feishu --reply-to "user:OPEN_ID"
-$OC agent --thinking medium --message "Complex analysis"
-```
-
-### List / manage agents
-```bash
-$OC agents list
-$OC agents list --bindings --json
-$OC agents add --help      # see options
-$OC agents bind --help
-$OC agents unbind --help
-$OC agents delete <id>
-```
-
----
-
-## 4. Sessions
-```bash
-$OC sessions                          # list all
-$OC sessions --agent main             # for specific agent
-$OC sessions --all-agents             # across agents
-$OC sessions --active 60              # active in last 60 min
-$OC sessions --json
-$OC sessions cleanup                  # maintenance
-```
-
----
-
-## 5. Memory
-```bash
-$OC memory search "keyword"
-$OC memory search --query "topic" --max-results 20
-$OC memory status
-$OC memory status --deep
-$OC memory index --force
-```
-
----
-
-## 6. Models
-```bash
-$OC models list                       # configured models
-$OC models status                     # current model state
-$OC models set <model>                # set default model
-$OC models aliases list               # list aliases
-$OC models auth list                  # list auth profiles
-```
-
----
-
-## 7. Channels
-```bash
-$OC channels list                     # configured channels
-$OC channels status                   # channel health
-$OC channels status --probe           # with probing
-```
-
----
-
-## 8. Nodes (paired devices)
-```bash
-$OC nodes status                      # list nodes + status
-$OC nodes list                        # list paired nodes
-$OC nodes notify --node "name" --title "Alert" --body "Message"
-$OC nodes camera --node "name"        # capture camera
-$OC nodes screen --node "name"        # capture screen
-$OC nodes invoke --node "name" --command "cmd" --params '{}'
-$OC nodes run --node "name" -- ls -la # run shell on node (mac)
-```
-
----
-
-## 9. Directory (contact/group lookup)
-```bash
-$OC directory self --channel feishu
-$OC directory peers list --channel feishu --query "name"
-$OC directory groups list --channel feishu
-$OC directory groups members --channel feishu --group-id "ID"
-```
-
----
-
-## 10. Skills
-```bash
-$OC skills list
-$OC skills info <name>
-$OC skills check
-```
-
----
-
-## 11. Config
-```bash
-$OC config get <dot.path>             # e.g. agents.defaults.model.primary
-$OC config set <dot.path> <value>
-$OC config unset <dot.path>
-$OC config file                       # print config file path
-$OC config validate
-```
-
----
-
-## 12. System & Health
-```bash
-$OC health                            # gateway health
-$OC status                            # channel health + recent sessions
-$OC doctor                            # health checks + quick fixes
-$OC system heartbeat trigger          # trigger heartbeat
-$OC system event --event "custom" --message "text"  # send system event
-$OC system presence                   # list presence entries
-```
-
----
-
-## 13. Webhooks
-```bash
-$OC webhooks gmail --help             # Gmail Pub/Sub hooks
-```
-
----
+**System:** `$OC health|status|doctor` | `$OC system heartbeat trigger|event|presence`
 
 ## Tips
 
-- Extract the sender's Feishu `open_id` (format: `ou_xxxx`) from conversation metadata for `--to`.
-- Default timezone: `Asia/Shanghai` for Chinese users.
-- One-time reminders: `--at <time> --delete-after-run`.
-- Recurring: `--cron <expr>` or `--every <duration>`.
-- `--announce` is required for cron results to be delivered to chat.
-- When user says "设定定时任务" → use `$OC cron add`.
-- When user says "我有什么定时任务" → use `$OC cron list`.
-- When user says "发消息给..." → use `$OC message send`.
-- When user says "查看最近消息" → use `$OC message read`.
-- When user says "搜索记忆" → use `$OC memory search`.
+- Extract sender's `open_id` (format: `ou_xxxx`) from conversation metadata for `--to`.
+- Default timezone: `Asia/Shanghai`. One-time: `--at time --delete-after-run`. Recurring: `--cron expr` or `--every dur`.
+- `--announce` required for cron results to be delivered to chat.
 - Add `--json` to any command for machine-readable output.
-- Supported channels: `feishu`, `telegram`, `whatsapp`, `discord`, `slack`, `signal`, `imessage`, `line`, `msteams`, `mattermost`, `matrix`, etc.

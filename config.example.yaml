@@ -9,6 +9,7 @@ cli:
   timeout: 900000       # 15 minutes per request
   max_concurrent: 3     # max simultaneous CLI subprocesses
   # skill_file: ./openclaw-skill.md  # resolved relative to cwd
+  effort: "low"                 # low | medium | high | max (reduces thinking time)
 
 session:
   ttl: 3600             # 1 hour

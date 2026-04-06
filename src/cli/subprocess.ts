@@ -9,8 +9,9 @@ export interface SubprocessOptions {
   timeout?: number;
   cwd?: string;
   skillsDir?: string;
-  tenantName?: string;           // load skills from skills/<tenantName>/
-  env?: Record<string, string>;  // extra env vars (from tenant config)
+  tenantName?: string;
+  env?: Record<string, string>;
+  effort?: string;               // "low" | "medium" | "high" | "max"
 }
 
 const MODEL_MAP: Record<string, string> = {
@@ -75,8 +76,7 @@ export class ClaudeSubprocess extends EventEmitter {
       "--include-partial-messages",
       "--model", mapModel(input.model),
       "--no-session-persistence",
-      // Keep CLI built-in tools enabled so it can execute them internally.
-      // The singleTurn mode controls whether to stop after the first message.
+      "--effort", this.opts.effort || "low",
     ];
 
     // Add per-tenant synced skill directories: skills/<tenantName>/<skillName>/
