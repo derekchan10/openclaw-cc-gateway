@@ -120,6 +120,8 @@ function handleStream(
       }
     }, config.cli.timeout + 30_000);
 
+    console.log(`[${tenantName}] stream: starting CLI (prompt=${cliInput.prompt.length} chars)`);
+
     const tenant = config.tenants.find((t) => t.name === tenantName);
     const sub = new ClaudeSubprocess({
       bin: config.cli.bin,
@@ -130,7 +132,11 @@ function handleStream(
       skillsDir: config.skills.dir,
     });
 
-    res.on("close", () => { sub.kill(); done(); });
+    res.on("close", () => {
+      console.log(`[${tenantName}] stream: client disconnected`);
+      sub.kill();
+      done();
+    });
 
     // Buffer events per turn. Each turn starts at message_start, ends at message_stop.
     let currentTurn: Array<{ eventType: string; data: Record<string, unknown> }> = [];
@@ -139,9 +145,38 @@ function handleStream(
     // Track ALL turns, keep last completed turn as fallback
     let lastCompletedTurn: Array<{ eventType: string; data: Record<string, unknown> }> = [];
     let flushed = false;
+    let headersSent = false;
+
+    // Send SSE headers + keepalive ping as soon as CLI starts producing output.
+    // This prevents OpenClaw's pi-ai SDK from timing out the HTTP connection
+    // while CLI is processing multi-turn tool calls internally.
+    const ensureHeaders = () => {
+      if (headersSent) return;
+      headersSent = true;
+      if (!res.headersSent) {
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Connection", "keep-alive");
+        res.flushHeaders();
+      }
+      // Send periodic pings to keep connection alive during long CLI processing
+      const pingInterval = setInterval(() => {
+        if (res.writableEnded || flushed || resolved) {
+          clearInterval(pingInterval);
+          return;
+        }
+        try { res.write(": keepalive\n\n"); } catch { clearInterval(pingInterval); }
+      }, 15_000);
+      // Clean up interval on done
+      const origDone = done;
+      // Override done is tricky, just clear on resolve
+      res.on("close", () => clearInterval(pingInterval));
+    };
 
     sub.on("sse", (eventType: string, data: Record<string, unknown>) => {
+      // Send headers on first event to keep connection alive
       if (eventType === "message_start") {
+        ensureHeaders();
         currentTurn = [];
       }
 
