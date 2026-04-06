@@ -148,9 +148,7 @@ function handleStream(
     let flushed = false;
     let headersSent = false;
 
-    // Send SSE headers + keepalive ping as soon as CLI starts producing output.
-    // This prevents OpenClaw's pi-ai SDK from timing out the HTTP connection
-    // while CLI is processing multi-turn tool calls internally.
+    // Send SSE headers immediately so client knows we're alive.
     const ensureHeaders = () => {
       if (headersSent) return;
       headersSent = true;
@@ -160,20 +158,6 @@ function handleStream(
         res.setHeader("Connection", "keep-alive");
         res.flushHeaders();
       }
-      // Send periodic pings to keep connection alive during long CLI processing
-      const pingInterval = setInterval(() => {
-        if (res.writableEnded || flushed || resolved) {
-          clearInterval(pingInterval);
-          return;
-        }
-        try {
-          res.write(`event: ping\ndata: {"type":"ping"}\n\n`);
-        } catch { clearInterval(pingInterval); }
-      }, 15_000);
-      // Clean up interval on done
-      const origDone = done;
-      // Override done is tricky, just clear on resolve
-      res.on("close", () => clearInterval(pingInterval));
     };
 
     sub.on("sse", (eventType: string, data: Record<string, unknown>) => {
