@@ -1,5 +1,9 @@
 # OpenClaw CC Gateway
 
+[![GitHub stars](https://img.shields.io/github/stars/derekchan10/openclaw-cc-gateway?style=social)](https://github.com/derekchan10/openclaw-cc-gateway/stargazers)
+[![GitHub license](https://img.shields.io/github/license/derekchan10/openclaw-cc-gateway)](LICENSE)
+[![Star History Chart](https://api.star-history.com/svg?repos=derekchan10/openclaw-cc-gateway&type=Date)](https://star-history.com/#derekchan10/openclaw-cc-gateway&Date)
+
 [English](README.md) | 中文
 
 为 [OpenClaw](https://github.com/openclaw/openclaw) 设计的多租户 Claude Code CLI 网关。通过 Claude Code CLI 子进程路由 LLM 请求，绕过 Anthropic 2026 年 4 月的第三方 OAuth 限制，实现按租户隔离的 skill、会话和环境变量。
