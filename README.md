@@ -284,10 +284,6 @@ The gateway injects `openclaw-skill.md` as a system prompt, teaching the Claude 
 
 When the CLI uses tools internally (Bash, Read, etc.), it produces multiple message rounds. The gateway buffers intermediate tool-use rounds and only forwards the final `end_turn` response to the client, preventing pi-ai SDK "Unexpected event order" errors.
 
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=derekchan10/openclaw-cc-gateway&type=Date)](https://star-history.com/#derekchan10/openclaw-cc-gateway&Date)
-
 ## License
 
 [MIT](LICENSE)

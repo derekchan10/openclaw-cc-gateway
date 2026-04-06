@@ -282,10 +282,6 @@ curl -X POST http://localhost:3456/v1/chat/completions \
 
 当 CLI 内部使用工具（Bash、Read 等）时，会产生多轮消息。网关缓冲中间的工具调用轮次，仅将最终的 `end_turn` 响应转发给客户端，防止 pi-ai SDK 的"Unexpected event order"错误。
 
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=derekchan10/openclaw-cc-gateway&type=Date)](https://star-history.com/#derekchan10/openclaw-cc-gateway&Date)
-
 ## 许可证
 
 [MIT](LICENSE)

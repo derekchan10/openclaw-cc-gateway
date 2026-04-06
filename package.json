@@ -7,13 +7,44 @@
   "bin": {
     "openclaw-cc-gateway": "dist/index.js"
   },
+  "files": [
+    "dist",
+    "openclaw-skill.md",
+    "config.example.yaml",
+    "README.md",
+    "README_CN.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "setup": "node dist/setup.js",
     "manage": "node dist/manage.js",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "openclaw",
+    "claude",
+    "claude-code",
+    "claude-max",
+    "anthropic",
+    "gateway",
+    "proxy",
+    "multi-tenant",
+    "cli",
+    "openai-compatible",
+    "llm"
+  ],
+  "author": "DC <dchan0831@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/derekchan10/openclaw-cc-gateway.git"
+  },
+  "homepage": "https://github.com/derekchan10/openclaw-cc-gateway",
+  "bugs": {
+    "url": "https://github.com/derekchan10/openclaw-cc-gateway/issues"
   },
   "dependencies": {
     "express": "^4.21.2",
