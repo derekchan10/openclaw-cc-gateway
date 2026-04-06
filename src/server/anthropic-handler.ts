@@ -86,10 +86,10 @@ export function createAnthropicHandler(config: Config, queue: ConcurrencyQueue, 
  * Streaming: transparently forward ALL SSE events from CLI to client.
  *
  * CLI produces multiple message rounds when using tools internally.
- * We forward everything — client (pi-ai SDK) will see tool_use events
- * but won't try to execute them (they're CLI's internal tools, not
- * OpenClaw's tools). This keeps the connection alive during long
- * multi-turn tool executions.
+ * We buffer intermediate tool_use rounds (sending SSE comments to keep
+ * the connection alive) and only forward the final end_turn round.
+ * This prevents pi-ai SDK "Unexpected event order" errors while
+ * avoiding client timeout during long multi-turn executions.
  */
 function handleStream(
   res: Response,
@@ -144,23 +144,56 @@ function handleStream(
       done("client-disconnect");
     });
 
-    // Transparent passthrough: forward every SSE event from CLI to client
+    // Buffer per turn. Forward only the final turn (stop_reason != tool_use).
+    // During intermediate tool_use rounds, send SSE comments (`: ...`) to keep
+    // the HTTP connection alive. SSE comments are ignored by event parsers.
+    let currentTurn: Array<{ eventType: string; data: Record<string, unknown> }> = [];
+    let lastStopReason = "";
+    let turnCount = 0;
+
     sub.on("sse", (eventType: string, data: Record<string, unknown>) => {
-      // Patch model name in message_start events
       if (eventType === "message_start") {
+        currentTurn = [];
         const msg = data.message as Record<string, unknown> | undefined;
         if (msg) msg.model = requestModel;
       }
 
-      try {
-        res.write(`event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`);
-      } catch {
-        // Client already disconnected
+      if (eventType === "message_delta") {
+        const delta = data.delta as Record<string, unknown> | undefined;
+        if (delta?.stop_reason) lastStopReason = delta.stop_reason as string;
+      }
+
+      currentTurn.push({ eventType, data });
+
+      if (eventType === "message_stop") {
+        turnCount++;
+        if (lastStopReason === "tool_use") {
+          // Intermediate tool turn — don't forward events, but send an SSE
+          // comment to keep the connection alive (not a named event, so
+          // pi-ai SDK's event parser ignores it)
+          try {
+            res.write(`: turn ${turnCount} tool_use (buffered)\n\n`);
+          } catch { /* client disconnected */ }
+          currentTurn = [];
+          lastStopReason = "";
+        } else {
+          // Final turn — forward all buffered events
+          for (const { eventType: et, data: d } of currentTurn) {
+            try {
+              res.write(`event: ${et}\ndata: ${JSON.stringify(d)}\n\n`);
+            } catch { break; }
+          }
+          currentTurn = [];
+        }
       }
     });
 
     sub.on("error", (err: Error) => {
       console.error(`[${tenantName}] CLI error:`, err.message);
+      // Flush any buffered events before closing
+      for (const { eventType: et, data: d } of currentTurn) {
+        try { res.write(`event: ${et}\ndata: ${JSON.stringify(d)}\n\n`); } catch { break; }
+      }
       try {
         if (!res.writableEnded) res.end();
       } catch { /* ignore */ }
@@ -170,6 +203,12 @@ function handleStream(
     sub.on("close", (code: number | null) => {
       if (code !== 0 && code !== null) {
         console.warn(`[${tenantName}] CLI exited with code ${code}`);
+      }
+      // Flush any remaining buffered events
+      if (currentTurn.length > 0) {
+        for (const { eventType: et, data: d } of currentTurn) {
+          try { res.write(`event: ${et}\ndata: ${JSON.stringify(d)}\n\n`); } catch { break; }
+        }
       }
       try {
         if (!res.writableEnded) res.end();
