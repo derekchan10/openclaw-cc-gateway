@@ -41,7 +41,18 @@ function extractContent(content: string | AnthropicContentBlock[]): string {
   if (!Array.isArray(content)) return String(content);
 
   return content
-    .filter((b) => b.type === "text" && b.text)
-    .map((b) => b.text!)
+    .map((b) => {
+      if (b.type === "text" && b.text) return b.text;
+      if (b.type === "image") return "[Image received — image analysis not available in CLI proxy mode]";
+      if (b.type === "tool_use") return `[Tool call: ${b.name}]`;
+      if (b.type === "tool_result") {
+        const text = typeof b.content === "string" ? b.content
+          : Array.isArray(b.content) ? b.content.filter(c => c.type === "text").map(c => c.text).join("\n")
+          : "";
+        return text || "[Tool result]";
+      }
+      return "";
+    })
+    .filter(Boolean)
     .join("\n");
 }
