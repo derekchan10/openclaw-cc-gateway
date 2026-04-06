@@ -282,4 +282,4 @@ curl -X POST http://localhost:3456/v1/chat/completions \
 
 ## 许可证
 
-MIT
+[MIT](LICENSE)

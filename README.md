@@ -284,4 +284,4 @@ When the CLI uses tools internally (Bash, Read, etc.), it produces multiple mess
 
 ## License
 
-MIT
+[MIT](LICENSE)
