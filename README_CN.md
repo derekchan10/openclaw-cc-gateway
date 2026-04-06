@@ -2,8 +2,6 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/derekchan10/openclaw-cc-gateway?style=social)](https://github.com/derekchan10/openclaw-cc-gateway/stargazers)
 [![GitHub license](https://img.shields.io/github/license/derekchan10/openclaw-cc-gateway)](LICENSE)
-[![Star History Chart](https://api.star-history.com/svg?repos=derekchan10/openclaw-cc-gateway&type=Date)](https://star-history.com/#derekchan10/openclaw-cc-gateway&Date)
-
 [English](README.md) | 中文
 
 为 [OpenClaw](https://github.com/openclaw/openclaw) 设计的多租户 Claude Code CLI 网关。通过 Claude Code CLI 子进程路由 LLM 请求，绕过 Anthropic 2026 年 4 月的第三方 OAuth 限制，实现按租户隔离的 skill、会话和环境变量。
@@ -283,6 +281,10 @@ curl -X POST http://localhost:3456/v1/chat/completions \
 ## 多轮工具处理
 
 当 CLI 内部使用工具（Bash、Read 等）时，会产生多轮消息。网关缓冲中间的工具调用轮次，仅将最终的 `end_turn` 响应转发给客户端，防止 pi-ai SDK 的"Unexpected event order"错误。
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=derekchan10/openclaw-cc-gateway&type=Date)](https://star-history.com/#derekchan10/openclaw-cc-gateway&Date)
 
 ## 许可证
 

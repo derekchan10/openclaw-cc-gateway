@@ -2,8 +2,6 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/derekchan10/openclaw-cc-gateway?style=social)](https://github.com/derekchan10/openclaw-cc-gateway/stargazers)
 [![GitHub license](https://img.shields.io/github/license/derekchan10/openclaw-cc-gateway)](LICENSE)
-[![Star History Chart](https://api.star-history.com/svg?repos=derekchan10/openclaw-cc-gateway&type=Date)](https://star-history.com/#derekchan10/openclaw-cc-gateway&Date)
-
 English | [中文](README_CN.md)
 
 Multi-tenant Claude Code CLI gateway for [OpenClaw](https://github.com/openclaw/openclaw). Bypasses Anthropic's third-party OAuth restrictions by routing LLM requests through the Claude Code CLI subprocess, with per-tenant skill and session isolation.
@@ -285,6 +283,10 @@ The gateway injects `openclaw-skill.md` as a system prompt, teaching the Claude 
 ## Multi-turn Tool Handling
 
 When the CLI uses tools internally (Bash, Read, etc.), it produces multiple message rounds. The gateway buffers intermediate tool-use rounds and only forwards the final `end_turn` response to the client, preventing pi-ai SDK "Unexpected event order" errors.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=derekchan10/openclaw-cc-gateway&type=Date)](https://star-history.com/#derekchan10/openclaw-cc-gateway&Date)
 
 ## License
 
