@@ -1,0 +1,34 @@
+{
+  "name": "openclaw-cc-gateway",
+  "version": "0.2.0",
+  "description": "Multi-tenant Claude Code CLI gateway for OpenClaw with auto-discovery",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "openclaw-cc-gateway": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "setup": "node dist/setup.js",
+    "manage": "node dist/manage.js",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "js-yaml": "^4.1.0",
+    "uuid": "^11.0.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.10.7",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}

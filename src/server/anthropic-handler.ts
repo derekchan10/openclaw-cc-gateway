@@ -1,0 +1,327 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import type { Request, Response } from "express";
+import { v4 as uuidv4 } from "uuid";
+import type { AnthropicMessagesRequest, AnthropicMessagesResponse } from "../types/anthropic.js";
+import { anthropicToCliInput } from "../adapter/anthropic-to-cli.js";
+import { ClaudeSubprocess } from "../cli/subprocess.js";
+import { ConcurrencyQueue, TooManyRequestsError } from "../cli/queue.js";
+import { SessionManager } from "../session/manager.js";
+import type { Config } from "../config.js";
+
+let _skillContent: string | null = null;
+function loadSkill(config: Config): string {
+  if (_skillContent !== null) return _skillContent;
+  const file = config.cli.skill_file || resolve(process.cwd(), "openclaw-skill.md");
+  try {
+    _skillContent = readFileSync(file, "utf8");
+    console.log(`[gateway] Loaded skill from ${file} (${_skillContent.length} chars)`);
+  } catch {
+    _skillContent = "";
+    console.warn(`[gateway] No skill file found at ${file}`);
+  }
+  return _skillContent;
+}
+
+export function createAnthropicHandler(config: Config, queue: ConcurrencyQueue, sessions: SessionManager) {
+  return async (req: Request, res: Response): Promise<void> => {
+    const body = req.body as AnthropicMessagesRequest;
+
+    if (!body?.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
+      res.status(400).json({
+        type: "error",
+        error: { type: "invalid_request_error", message: "messages is required" },
+      });
+      return;
+    }
+
+    if (!body.max_tokens) {
+      res.status(400).json({
+        type: "error",
+        error: { type: "invalid_request_error", message: "max_tokens is required" },
+      });
+      return;
+    }
+
+    const tenant = req.tenant!;
+    const conversationId = body.metadata?.user_id || uuidv4();
+    const sessionId = sessions.getOrCreate(tenant.name, conversationId, body.model);
+    const cliInput = anthropicToCliInput(body, sessionId);
+    const isStream = body.stream !== false;
+
+    // Inject OpenClaw skill + tenant context
+    const skill = loadSkill(config);
+    if (skill) {
+      const tenantContext = `\n\n<!-- openclaw-tenant: ${tenant.name} -->`;
+      cliInput.systemPrompt = (cliInput.systemPrompt || "") + "\n\n" + skill + tenantContext;
+    }
+
+    const singleTurn = false;
+
+    try {
+      await queue.acquire(tenant.name, () =>
+        isStream
+          ? handleStream(res, cliInput, body.model, config, tenant.name)
+          : handleNonStream(res, cliInput, body.model, config, tenant.name),
+      );
+    } catch (err) {
+      if (err instanceof TooManyRequestsError) {
+        res.status(429).json({
+          type: "error",
+          error: { type: "rate_limit_error", message: "Too many concurrent requests" },
+        });
+      } else {
+        console.error(`[${tenant.name}] Unexpected error:`, err);
+        if (!res.headersSent) {
+          res.status(500).json({
+            type: "error",
+            error: { type: "api_error", message: String(err) },
+          });
+        }
+      }
+    }
+  };
+}
+
+/**
+ * Streaming: buffer events per turn, only flush the LAST turn's events.
+ *
+ * CLI produces multiple turns when it uses tools internally:
+ *   Turn 1: message_start → tool_use → message_stop (stop_reason=tool_use)
+ *   Turn 2: message_start → text → message_stop (stop_reason=end_turn)
+ *
+ * pi-ai SDK expects exactly ONE message_start → ... → message_stop sequence.
+ * We buffer each turn and only send the final one.
+ */
+function handleStream(
+  res: Response,
+  cliInput: { prompt: string; model: string; sessionId?: string; systemPrompt?: string },
+  requestModel: string,
+  config: Config,
+  tenantName: string,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => { if (!resolved) { resolved = true; resolve(); } };
+
+    const tenant = config.tenants.find((t) => t.name === tenantName);
+    const sub = new ClaudeSubprocess({
+      bin: config.cli.bin,
+      timeout: config.cli.timeout,
+      cwd: tenant?.working_dir,
+      env: tenant?.env,
+      tenantName,
+      skillsDir: config.skills.dir,
+    });
+
+    res.on("close", () => { sub.kill(); done(); });
+
+    // Buffer events per turn. Each turn starts at message_start, ends at message_stop.
+    let currentTurn: Array<{ eventType: string; data: Record<string, unknown> }> = [];
+    let lastStopReason = "";
+
+    sub.on("sse", (eventType: string, data: Record<string, unknown>) => {
+      if (eventType === "message_start") {
+        // New turn starting — discard previous buffered turn
+        currentTurn = [];
+      }
+
+      // Patch model name
+      if (eventType === "message_start") {
+        const msg = data.message as Record<string, unknown> | undefined;
+        if (msg) msg.model = requestModel;
+      }
+
+      // Track stop reason
+      if (eventType === "message_delta") {
+        const delta = data.delta as Record<string, unknown> | undefined;
+        if (delta?.stop_reason) lastStopReason = delta.stop_reason as string;
+      }
+
+      currentTurn.push({ eventType, data });
+
+      // When message_stop arrives, check if this is a tool_use turn or final turn
+      if (eventType === "message_stop") {
+        if (lastStopReason === "tool_use") {
+          // Tool turn — CLI will execute the tool and continue. Discard this buffer.
+          currentTurn = [];
+          lastStopReason = "";
+        } else {
+          // Final turn (end_turn / max_tokens) — flush to client
+          flushTurn(res, currentTurn);
+          currentTurn = [];
+        }
+      }
+    });
+
+    sub.on("error", (err: Error) => {
+      console.error(`[${tenantName}] CLI error:`, err.message);
+      // If we have buffered events from the last turn, flush them first
+      if (currentTurn.length > 0) {
+        flushTurn(res, currentTurn);
+        currentTurn = [];
+      }
+      if (!res.headersSent) {
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache");
+        res.flushHeaders();
+      }
+      res.write(`event: error\ndata: ${JSON.stringify({
+        type: "error",
+        error: { type: "api_error", message: err.message },
+      })}\n\n`);
+      res.end();
+      done();
+    });
+
+    sub.on("close", () => {
+      // If there are unflushed events (shouldn't happen normally), flush them
+      if (currentTurn.length > 0) {
+        flushTurn(res, currentTurn);
+      }
+      if (!res.writableEnded) res.end();
+      done();
+    });
+
+    sub.start(cliInput);
+  });
+}
+
+function flushTurn(res: Response, events: Array<{ eventType: string; data: Record<string, unknown> }>): void {
+  if (!res.headersSent) {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+  }
+  for (const { eventType, data } of events) {
+    res.write(`event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`);
+  }
+}
+
+/**
+ * Non-streaming: collect content blocks from the LAST turn only.
+ */
+function handleNonStream(
+  res: Response,
+  cliInput: { prompt: string; model: string; sessionId?: string; systemPrompt?: string },
+  requestModel: string,
+  config: Config,
+  tenantName: string,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const tenant = config.tenants.find((t) => t.name === tenantName);
+    const sub = new ClaudeSubprocess({
+      bin: config.cli.bin,
+      timeout: config.cli.timeout,
+      cwd: tenant?.working_dir,
+      env: tenant?.env,
+      tenantName,
+      skillsDir: config.skills.dir,
+    });
+
+    // Track per-turn state, reset on each message_start
+    let contentBlocks: unknown[] = [];
+    let currentBlock: Record<string, unknown> | null = null;
+    let stopReason = "end_turn";
+    let usage = { input_tokens: 0, output_tokens: 0 };
+    let messageId = "";
+
+    sub.on("sse", (eventType: string, data: Record<string, unknown>) => {
+      switch (eventType) {
+        case "message_start": {
+          // New turn — reset everything
+          contentBlocks = [];
+          currentBlock = null;
+          const msg = data.message as Record<string, unknown> | undefined;
+          if (msg) {
+            messageId = (msg.id as string) || "";
+            const u = msg.usage as Record<string, unknown> | undefined;
+            if (u) {
+              usage.input_tokens = ((u.cache_read_input_tokens as number) || 0) +
+                ((u.cache_creation_input_tokens as number) || 0) +
+                ((u.input_tokens as number) || 0);
+            }
+          }
+          break;
+        }
+        case "content_block_start": {
+          const block = data.content_block as Record<string, unknown>;
+          currentBlock = { ...block };
+          if (currentBlock.type === "text") currentBlock.text = "";
+          if (currentBlock.type === "tool_use") currentBlock.input = {};
+          break;
+        }
+        case "content_block_delta": {
+          if (!currentBlock) break;
+          const delta = data.delta as Record<string, unknown>;
+          if (delta.type === "text_delta" && currentBlock.type === "text") {
+            currentBlock.text = (currentBlock.text as string) + (delta.text as string);
+          } else if (delta.type === "input_json_delta" && currentBlock.type === "tool_use") {
+            currentBlock._partialJson = ((currentBlock._partialJson as string) || "") + (delta.partial_json as string);
+          } else if (delta.type === "thinking_delta" && currentBlock.type === "thinking") {
+            currentBlock.thinking = ((currentBlock.thinking as string) || "") + (delta.thinking as string);
+          } else if (delta.type === "signature_delta" && currentBlock.type === "thinking") {
+            currentBlock.signature = ((currentBlock.signature as string) || "") + (delta.signature as string);
+          }
+          break;
+        }
+        case "content_block_stop": {
+          if (currentBlock) {
+            if (currentBlock.type === "tool_use" && currentBlock._partialJson) {
+              try { currentBlock.input = JSON.parse(currentBlock._partialJson as string); } catch { /* keep empty */ }
+              delete currentBlock._partialJson;
+            }
+            contentBlocks.push(currentBlock);
+            currentBlock = null;
+          }
+          break;
+        }
+        case "message_delta": {
+          const delta = data.delta as Record<string, unknown> | undefined;
+          if (delta?.stop_reason) stopReason = delta.stop_reason as string;
+          const u = data.usage as Record<string, unknown> | undefined;
+          if (u?.output_tokens) usage.output_tokens = u.output_tokens as number;
+          break;
+        }
+      }
+    });
+
+    const sendResponse = () => {
+      if (res.headersSent) return;
+      // Filter out thinking blocks for cleaner response
+      const filteredBlocks = contentBlocks.filter(
+        (b) => (b as Record<string, unknown>).type !== "thinking"
+      );
+      const response: AnthropicMessagesResponse = {
+        id: messageId || `msg_${uuidv4().replace(/-/g, "").slice(0, 24)}`,
+        type: "message",
+        role: "assistant",
+        content: (filteredBlocks.length > 0 ? filteredBlocks : contentBlocks) as AnthropicMessagesResponse["content"],
+        model: requestModel,
+        stop_reason: stopReason as AnthropicMessagesResponse["stop_reason"],
+        stop_sequence: null,
+        usage,
+      };
+      res.json(response);
+    };
+
+    sub.on("error", (err: Error) => {
+      console.error(`[${tenantName}] CLI error:`, err.message);
+      if (!res.headersSent) {
+        res.status(500).json({
+          type: "error",
+          error: { type: "api_error", message: err.message },
+        });
+      }
+      resolve();
+    });
+
+    sub.on("close", () => {
+      sendResponse();
+      resolve();
+    });
+
+    sub.start(cliInput);
+  });
+}
