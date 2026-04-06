@@ -138,13 +138,39 @@ export function detectDockerHostIP(): string {
 }
 
 /**
- * Extract env vars from an OpenClaw instance's openclaw.json `env` block.
- * For Docker instances, automatically maps container paths to host paths.
+ * Env vars to skip when extracting from container runtime.
+ * These are standard system/node/docker vars not relevant to skills.
+ */
+const SKIP_ENV_PREFIXES = [
+  "PATH", "HOME", "HOSTNAME", "TERM", "SHLVL", "PWD", "LANG", "LC_",
+  "NODE_", "npm_", "YARN_", "NVM_",
+  "OPENCLAW_GATEWAY", "OPENCLAW_ALLOW",
+  "ANTHROPIC_", "OPENAI_", "CLAUDE_",
+  "DOCKER_", "KUBERNETES_",
+];
+
+const SKIP_ENV_EXACT = new Set([
+  "HOME", "USER", "SHELL", "LOGNAME", "OLDPWD", "_",
+  "BROWSER", "EDITOR", "VISUAL",
+]);
+
+function shouldSkipEnv(key: string): boolean {
+  if (SKIP_ENV_EXACT.has(key)) return true;
+  return SKIP_ENV_PREFIXES.some((p) => key.startsWith(p));
+}
+
+/**
+ * Extract env vars from an OpenClaw instance.
+ * For Docker instances, merges two sources:
+ *   1. openclaw.json `env` block (skill-specific vars)
+ *   2. Container runtime env (docker compose vars like FEISHU_APP_ID)
+ * Filters out standard system vars and auto-maps container paths to host paths.
  */
 export function extractInstanceEnv(instance: DiscoveredInstance): Record<string, string> {
   let env: Record<string, string> = {};
 
   if (instance.mode === "docker") {
+    // Source 1: openclaw.json env block
     try {
       const output = execSync(
         `docker exec ${instance.container} node -e "
@@ -156,7 +182,28 @@ export function extractInstanceEnv(instance: DiscoveredInstance): Record<string,
         { encoding: "utf8", timeout: 5000 },
       ).trim();
       env = JSON.parse(output);
-    } catch { return {}; }
+    } catch { /* ignore */ }
+
+    // Source 2: Container runtime env (from docker compose / .env files)
+    // These include FEISHU_APP_ID, FEISHU_APP_SECRET etc. that aren't in openclaw.json
+    try {
+      const output = execSync(
+        `docker exec ${instance.container} env`,
+        { encoding: "utf8", timeout: 5000 },
+      ).trim();
+      for (const line of output.split("\n")) {
+        const eqIdx = line.indexOf("=");
+        if (eqIdx <= 0) continue;
+        const key = line.slice(0, eqIdx);
+        const val = line.slice(eqIdx + 1);
+        // Skip system vars, only keep app-specific ones
+        if (shouldSkipEnv(key)) continue;
+        // Don't overwrite openclaw.json values (they take priority)
+        if (!(key in env) && val) {
+          env[key] = val;
+        }
+      }
+    } catch { /* ignore */ }
 
     // Map container paths to host paths
     const containerHome = detectContainerHome(instance.container);
