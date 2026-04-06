@@ -2,8 +2,12 @@ import type { AnthropicMessagesRequest, AnthropicContentBlock } from "../types/a
 import type { CliInput } from "../types/cli.js";
 import { mapModel } from "../cli/subprocess.js";
 
+// Default container home → host home mapping
+const CONTAINER_HOME = "/home/node";
+
 export function anthropicToCliInput(req: AnthropicMessagesRequest, sessionId?: string): CliInput {
   const parts: string[] = [];
+  const hostHome = process.env.HOME || "/home/" + (process.env.USER || "user");
 
   // Extract system prompt
   let systemPrompt: string | undefined;
@@ -17,7 +21,11 @@ export function anthropicToCliInput(req: AnthropicMessagesRequest, sessionId?: s
 
   // Convert messages to prompt text
   for (const msg of req.messages) {
-    const text = extractContent(msg.content);
+    let text = extractContent(msg.content);
+    // Rewrite container paths to host paths in media references
+    if (text.includes(CONTAINER_HOME)) {
+      text = text.replace(new RegExp(CONTAINER_HOME.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"), hostHome);
+    }
     switch (msg.role) {
       case "user":
         parts.push(text);
