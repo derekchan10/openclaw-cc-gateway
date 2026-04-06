@@ -115,8 +115,11 @@ export function detectDockerHostIP(): string {
 
 /**
  * Extract env vars from an OpenClaw instance's openclaw.json `env` block.
+ * For Docker instances, automatically maps container paths to host paths.
  */
 export function extractInstanceEnv(instance: DiscoveredInstance): Record<string, string> {
+  let env: Record<string, string> = {};
+
   if (instance.mode === "docker") {
     try {
       const output = execSync(
@@ -128,8 +131,20 @@ export function extractInstanceEnv(instance: DiscoveredInstance): Record<string,
         "`,
         { encoding: "utf8", timeout: 5000 },
       ).trim();
-      return JSON.parse(output);
+      env = JSON.parse(output);
     } catch { return {}; }
+
+    // Map container paths to host paths
+    const containerHome = detectContainerHome(instance.container);
+    const hostHome = process.env.HOME || "/home/" + (process.env.USER || "user");
+    if (containerHome && containerHome !== hostHome) {
+      for (const [key, val] of Object.entries(env)) {
+        if (typeof val === "string" && val.includes(containerHome)) {
+          env[key] = val.replace(new RegExp(escapeRegExp(containerHome), "g"), hostHome);
+        }
+      }
+    }
+    return env;
   }
 
   // Local mode
@@ -141,6 +156,24 @@ export function extractInstanceEnv(instance: DiscoveredInstance): Record<string,
     const d = JSON.parse(raw);
     return d.env || {};
   } catch { return {}; }
+}
+
+/**
+ * Detect the HOME directory inside a Docker container.
+ */
+function detectContainerHome(container: string): string {
+  try {
+    return execSync(
+      `docker exec ${container} sh -c 'echo $HOME'`,
+      { encoding: "utf8", timeout: 3000 },
+    ).trim();
+  } catch {
+    return "/home/node"; // OpenClaw default
+  }
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
