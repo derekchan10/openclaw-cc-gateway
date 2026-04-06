@@ -136,6 +136,10 @@ function handleStream(
     let currentTurn: Array<{ eventType: string; data: Record<string, unknown> }> = [];
     let lastStopReason = "";
 
+    // Track ALL turns, keep last completed turn as fallback
+    let lastCompletedTurn: Array<{ eventType: string; data: Record<string, unknown> }> = [];
+    let flushed = false;
+
     sub.on("sse", (eventType: string, data: Record<string, unknown>) => {
       if (eventType === "message_start") {
         currentTurn = [];
@@ -155,10 +159,14 @@ function handleStream(
 
       if (eventType === "message_stop") {
         if (lastStopReason === "tool_use") {
+          // Tool turn — save as fallback, then clear for next turn
+          lastCompletedTurn = [...currentTurn];
           currentTurn = [];
           lastStopReason = "";
         } else {
+          // Final turn — flush to client
           flushTurn(res, currentTurn);
+          flushed = true;
           currentTurn = [];
         }
       }
@@ -166,26 +174,41 @@ function handleStream(
 
     sub.on("error", (err: Error) => {
       console.error(`[${tenantName}] CLI error:`, err.message);
-      if (currentTurn.length > 0) {
-        flushTurn(res, currentTurn);
-        currentTurn = [];
+      // If we never flushed a final turn, flush whatever we have
+      if (!flushed) {
+        if (currentTurn.length > 0) {
+          flushTurn(res, currentTurn);
+        } else if (lastCompletedTurn.length > 0) {
+          // Fallback: flush the last tool_use turn so client gets something
+          flushTurn(res, lastCompletedTurn);
+        }
       }
       if (!res.headersSent) {
         res.setHeader("Content-Type", "text/event-stream");
         res.setHeader("Cache-Control", "no-cache");
         res.flushHeaders();
       }
-      res.write(`event: error\ndata: ${JSON.stringify({
-        type: "error",
-        error: { type: "api_error", message: err.message },
-      })}\n\n`);
+      if (!flushed) {
+        res.write(`event: error\ndata: ${JSON.stringify({
+          type: "error",
+          error: { type: "api_error", message: err.message },
+        })}\n\n`);
+      }
       if (!res.writableEnded) res.end();
       done();
     });
 
-    sub.on("close", () => {
-      if (currentTurn.length > 0) {
-        flushTurn(res, currentTurn);
+    sub.on("close", (code: number | null) => {
+      // If we never flushed a final turn, flush whatever we have
+      if (!flushed) {
+        if (currentTurn.length > 0) {
+          flushTurn(res, currentTurn);
+        } else if (lastCompletedTurn.length > 0) {
+          flushTurn(res, lastCompletedTurn);
+        }
+        if (!flushed && code !== 0) {
+          console.warn(`[${tenantName}] CLI exited with code ${code} without final turn`);
+        }
       }
       if (!res.writableEnded) res.end();
       done();
