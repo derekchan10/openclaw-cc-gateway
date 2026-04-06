@@ -1,13 +1,14 @@
+import { homedir } from "node:os";
 import type { AnthropicMessagesRequest, AnthropicContentBlock } from "../types/anthropic.js";
 import type { CliInput } from "../types/cli.js";
 import { mapModel } from "../cli/subprocess.js";
 
-// Default container home → host home mapping
+// OpenClaw Docker containers use /home/node as HOME
 const CONTAINER_HOME = "/home/node";
+const HOST_HOME = homedir();
 
 export function anthropicToCliInput(req: AnthropicMessagesRequest, sessionId?: string): CliInput {
   const parts: string[] = [];
-  const hostHome = process.env.HOME || "/home/" + (process.env.USER || "user");
 
   // Extract system prompt
   let systemPrompt: string | undefined;
@@ -22,9 +23,9 @@ export function anthropicToCliInput(req: AnthropicMessagesRequest, sessionId?: s
   // Convert messages to prompt text
   for (const msg of req.messages) {
     let text = extractContent(msg.content);
-    // Rewrite container paths to host paths in media references
+    // Rewrite container paths to host paths (e.g. media file references)
     if (text.includes(CONTAINER_HOME)) {
-      text = text.replace(new RegExp(CONTAINER_HOME.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"), hostHome);
+      text = text.replaceAll(CONTAINER_HOME, HOST_HOME);
     }
     switch (msg.role) {
       case "user":
@@ -51,7 +52,6 @@ function extractContent(content: string | AnthropicContentBlock[]): string {
   return content
     .map((b) => {
       if (b.type === "text" && b.text) return b.text;
-      if (b.type === "image") return "[Image received — image analysis not available in CLI proxy mode]";
       if (b.type === "tool_use") return `[Tool call: ${b.name}]`;
       if (b.type === "tool_result") {
         const text = typeof b.content === "string" ? b.content
