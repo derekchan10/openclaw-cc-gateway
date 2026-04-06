@@ -57,8 +57,6 @@ export function createAnthropicHandler(config: Config, queue: ConcurrencyQueue, 
       cliInput.systemPrompt = (cliInput.systemPrompt || "") + "\n\n" + skill + tenantContext;
     }
 
-    const singleTurn = false;
-
     try {
       await queue.acquire(tenant.name, () =>
         isStream
@@ -85,14 +83,13 @@ export function createAnthropicHandler(config: Config, queue: ConcurrencyQueue, 
 }
 
 /**
- * Streaming: buffer events per turn, only flush the LAST turn's events.
+ * Streaming: transparently forward ALL SSE events from CLI to client.
  *
- * CLI produces multiple turns when it uses tools internally:
- *   Turn 1: message_start → tool_use → message_stop (stop_reason=tool_use)
- *   Turn 2: message_start → text → message_stop (stop_reason=end_turn)
- *
- * pi-ai SDK expects exactly ONE message_start → ... → message_stop sequence.
- * We buffer each turn and only send the final one.
+ * CLI produces multiple message rounds when using tools internally.
+ * We forward everything — client (pi-ai SDK) will see tool_use events
+ * but won't try to execute them (they're CLI's internal tools, not
+ * OpenClaw's tools). This keeps the connection alive during long
+ * multi-turn tool executions.
  */
 function handleStream(
   res: Response,
@@ -111,12 +108,11 @@ function handleStream(
       resolve();
     };
 
-    // Safety timeout: 10 minutes max regardless of CLI timeout
+    // Safety timeout: 10 minutes max
     const safetyTimer = setTimeout(() => {
       if (!resolved) {
         console.error(`[${tenantName}] Safety timeout (10min), forcing cleanup`);
         sub.kill();
-        if (!flushed) flushSynthetic("safety timeout");
         if (!res.writableEnded) res.end();
         done("safety-timeout");
       }
@@ -134,166 +130,55 @@ function handleStream(
       skillsDir: config.skills.dir,
     });
 
+    // Send SSE headers immediately
+    if (!res.headersSent) {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders();
+    }
+
     res.on("close", () => {
       console.log(`[${tenantName}] stream: client disconnected`);
       sub.kill();
-      done('close');
+      done("client-disconnect");
     });
 
-    // Buffer events per turn. Each turn starts at message_start, ends at message_stop.
-    let currentTurn: Array<{ eventType: string; data: Record<string, unknown> }> = [];
-    let lastStopReason = "";
-
-    // Track ALL turns, keep last completed turn as fallback
-    let lastCompletedTurn: Array<{ eventType: string; data: Record<string, unknown> }> = [];
-    let flushed = false;
-    let headersSent = false;
-
-    // Send SSE headers immediately so client knows we're alive.
-    const ensureHeaders = () => {
-      if (headersSent) return;
-      headersSent = true;
-      if (!res.headersSent) {
-        res.setHeader("Content-Type", "text/event-stream");
-        res.setHeader("Cache-Control", "no-cache");
-        res.setHeader("Connection", "keep-alive");
-        res.flushHeaders();
-      }
-    };
-
+    // Transparent passthrough: forward every SSE event from CLI to client
     sub.on("sse", (eventType: string, data: Record<string, unknown>) => {
-      // Send headers on first event to keep connection alive
-      if (eventType === "message_start") {
-        ensureHeaders();
-        currentTurn = [];
-      }
-
+      // Patch model name in message_start events
       if (eventType === "message_start") {
         const msg = data.message as Record<string, unknown> | undefined;
         if (msg) msg.model = requestModel;
       }
 
-      if (eventType === "message_delta") {
-        const delta = data.delta as Record<string, unknown> | undefined;
-        if (delta?.stop_reason) lastStopReason = delta.stop_reason as string;
-      }
-
-      currentTurn.push({ eventType, data });
-
-      if (eventType === "message_stop") {
-        if (lastStopReason === "tool_use") {
-          // Tool turn — save as fallback, then clear for next turn
-          lastCompletedTurn = [...currentTurn];
-          currentTurn = [];
-          lastStopReason = "";
-        } else {
-          // Final turn — flush to client
-          flushTurn(res, currentTurn);
-          flushed = true;
-          currentTurn = [];
-        }
+      try {
+        res.write(`event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        // Client already disconnected
       }
     });
 
-    // Synthesize a complete Anthropic SSE response from accumulated text.
-    // Used when CLI exits abnormally without a proper end_turn sequence.
-    const flushSynthetic = (reason: string) => {
-      if (flushed || res.writableEnded || res.destroyed) return;
-
-      // Collect any text from currentTurn or lastCompletedTurn events
-      let text = "";
-      const events = currentTurn.length > 0 ? currentTurn : lastCompletedTurn;
-      for (const { eventType, data } of events) {
-        if (eventType === "content_block_delta") {
-          const delta = data.delta as Record<string, unknown> | undefined;
-          if (delta?.type === "text_delta" && typeof delta.text === "string") {
-            text += delta.text;
-          }
-        }
-      }
-
-      if (!text) text = `[CLI exited: ${reason}]`;
-
-      // Send a complete synthetic Anthropic SSE sequence
-      const msgId = `msg_${Date.now().toString(36)}`;
-      if (!res.headersSent) {
-        res.setHeader("Content-Type", "text/event-stream");
-        res.setHeader("Cache-Control", "no-cache");
-        res.setHeader("Connection", "keep-alive");
-        res.flushHeaders();
-      }
-      res.write(`event: message_start\ndata: ${JSON.stringify({
-        type: "message_start",
-        message: { id: msgId, type: "message", role: "assistant", content: [], model: requestModel,
-          stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } },
-      })}\n\n`);
-      res.write(`event: content_block_start\ndata: ${JSON.stringify({
-        type: "content_block_start", index: 0, content_block: { type: "text", text: "" },
-      })}\n\n`);
-      res.write(`event: content_block_delta\ndata: ${JSON.stringify({
-        type: "content_block_delta", index: 0, delta: { type: "text_delta", text },
-      })}\n\n`);
-      res.write(`event: content_block_stop\ndata: ${JSON.stringify({
-        type: "content_block_stop", index: 0,
-      })}\n\n`);
-      res.write(`event: message_delta\ndata: ${JSON.stringify({
-        type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 0 },
-      })}\n\n`);
-      res.write(`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`);
-      flushed = true;
-    };
-
     sub.on("error", (err: Error) => {
+      console.error(`[${tenantName}] CLI error:`, err.message);
       try {
-        console.error(`[${tenantName}] CLI error:`, err.message);
-        if (!flushed) flushSynthetic(err.message);
         if (!res.writableEnded) res.end();
-      } catch (e) {
-        console.error(`[${tenantName}] Error in error handler:`, e);
-      }
-      done('error');
+      } catch { /* ignore */ }
+      done("error");
     });
 
     sub.on("close", (code: number | null) => {
-      console.log(`[${tenantName}] CLI close event: code=${code} flushed=${flushed} resolved=${resolved}`);
-      try {
-        if (!flushed) {
-          if (code !== 0) {
-            console.warn(`[${tenantName}] CLI exited with code ${code} without final turn`);
-          }
-          if (currentTurn.length > 0 && currentTurn.some(e => e.eventType === "message_stop")) {
-            flushTurn(res, currentTurn);
-          } else if (lastCompletedTurn.length > 0) {
-            flushTurn(res, lastCompletedTurn);
-          } else {
-            flushSynthetic(`exit code ${code}`);
-          }
-        }
-        if (!res.writableEnded) res.end();
-      } catch (e) {
-        console.error(`[${tenantName}] Error in close handler:`, e);
+      if (code !== 0 && code !== null) {
+        console.warn(`[${tenantName}] CLI exited with code ${code}`);
       }
-      done('close');
+      try {
+        if (!res.writableEnded) res.end();
+      } catch { /* ignore */ }
+      done("close");
     });
 
     sub.start(cliInput);
-
-    // Send headers immediately so client knows we're alive
-    // Don't wait for first CLI event (CLI startup takes seconds)
-    ensureHeaders();
   });
-}
-
-function flushTurn(res: Response, events: Array<{ eventType: string; data: Record<string, unknown> }>): void {
-  if (!res.headersSent) {
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    res.flushHeaders();
-  }
-  for (const { eventType, data } of events) {
-    res.write(`event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`);
-  }
 }
 
 /**
@@ -312,7 +197,8 @@ function handleNonStream(
       if (resolved) return;
       resolved = true;
       if (safetyTimer) clearTimeout(safetyTimer);
-      console.log(`[${tenantName}] done(non-stream): ${reason || "unknown"}`); resolve();
+      console.log(`[${tenantName}] done(non-stream): ${reason || "unknown"}`);
+      resolve();
     };
 
     const tenant = config.tenants.find((t) => t.name === tenantName);
@@ -325,13 +211,13 @@ function handleNonStream(
       skillsDir: config.skills.dir,
     });
 
-    // Safety timeout
+    // Safety timeout: 10 minutes
     const safetyTimer = setTimeout(() => {
       if (!resolved) {
-        console.error(`[${tenantName}] Safety timeout reached (non-stream), forcing cleanup`);
+        console.error(`[${tenantName}] Safety timeout (non-stream), forcing cleanup`);
         sub.kill();
         sendResponse();
-        done('close');
+        done("safety-timeout");
       }
     }, 600_000);
 
@@ -345,7 +231,7 @@ function handleNonStream(
     sub.on("sse", (eventType: string, data: Record<string, unknown>) => {
       switch (eventType) {
         case "message_start": {
-          // New turn — reset everything
+          // New turn — reset
           contentBlocks = [];
           currentBlock = null;
           const msg = data.message as Record<string, unknown> | undefined;
@@ -404,7 +290,6 @@ function handleNonStream(
 
     const sendResponse = () => {
       if (res.headersSent) return;
-      // Filter out thinking blocks for cleaner response
       const filteredBlocks = contentBlocks.filter(
         (b) => (b as Record<string, unknown>).type !== "thinking"
       );
@@ -429,12 +314,12 @@ function handleNonStream(
           error: { type: "api_error", message: err.message },
         });
       }
-      done('error');
+      done("error");
     });
 
     sub.on("close", () => {
       sendResponse();
-      done('close');
+      done("close");
     });
 
     sub.start(cliInput);
