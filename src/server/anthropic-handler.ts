@@ -175,7 +175,7 @@ function handleStream(
     // Synthesize a complete Anthropic SSE response from accumulated text.
     // Used when CLI exits abnormally without a proper end_turn sequence.
     const flushSynthetic = (reason: string) => {
-      if (flushed || res.writableEnded) return;
+      if (flushed || res.writableEnded || res.destroyed) return;
 
       // Collect any text from currentTurn or lastCompletedTurn events
       let text = "";
@@ -221,27 +221,34 @@ function handleStream(
     };
 
     sub.on("error", (err: Error) => {
-      console.error(`[${tenantName}] CLI error:`, err.message);
-      if (!flushed) flushSynthetic(err.message);
-      if (!res.writableEnded) res.end();
+      try {
+        console.error(`[${tenantName}] CLI error:`, err.message);
+        if (!flushed) flushSynthetic(err.message);
+        if (!res.writableEnded) res.end();
+      } catch (e) {
+        console.error(`[${tenantName}] Error in error handler:`, e);
+      }
       done();
     });
 
     sub.on("close", (code: number | null) => {
-      if (!flushed) {
-        if (code !== 0) {
-          console.warn(`[${tenantName}] CLI exited with code ${code} without final turn`);
+      try {
+        if (!flushed) {
+          if (code !== 0) {
+            console.warn(`[${tenantName}] CLI exited with code ${code} without final turn`);
+          }
+          if (currentTurn.length > 0 && currentTurn.some(e => e.eventType === "message_stop")) {
+            flushTurn(res, currentTurn);
+          } else if (lastCompletedTurn.length > 0) {
+            flushTurn(res, lastCompletedTurn);
+          } else {
+            flushSynthetic(`exit code ${code}`);
+          }
         }
-        // Try to flush a complete turn first, fallback to synthetic
-        if (currentTurn.length > 0 && currentTurn.some(e => e.eventType === "message_stop")) {
-          flushTurn(res, currentTurn);
-        } else if (lastCompletedTurn.length > 0) {
-          flushTurn(res, lastCompletedTurn);
-        } else {
-          flushSynthetic(`exit code ${code}`);
-        }
+        if (!res.writableEnded) res.end();
+      } catch (e) {
+        console.error(`[${tenantName}] Error in close handler:`, e);
       }
-      if (!res.writableEnded) res.end();
       done();
     });
 
