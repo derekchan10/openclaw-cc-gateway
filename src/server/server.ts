@@ -11,7 +11,7 @@ export function createServer(config: Config) {
   const app = express();
   app.use(express.json({ limit: "10mb" }));
 
-  const queue = new ConcurrencyQueue(config.cli.max_concurrent);
+  const queue = new ConcurrencyQueue(config.cli.max_concurrent, config.cli.max_per_tenant);
   const sessions = new SessionManager(
     config.session.ttl * 1000,
     config.session.cleanup_interval * 1000,
