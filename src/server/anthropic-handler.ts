@@ -48,6 +48,7 @@ export function createAnthropicHandler(config: Config, queue: ConcurrencyQueue, 
     const sessionId = sessions.getOrCreate(tenant.name, conversationId, body.model);
     const cliInput = anthropicToCliInput(body, sessionId);
     const isStream = body.stream !== false;
+    console.log(`[${tenant.name}] request: model=${body.model} stream=${isStream} messages=${body.messages.length}`);
 
     // Inject OpenClaw skill + tenant context
     const skill = loadSkill(config);
@@ -165,7 +166,9 @@ function handleStream(
           clearInterval(pingInterval);
           return;
         }
-        try { res.write(": keepalive\n\n"); } catch { clearInterval(pingInterval); }
+        try {
+          res.write(`event: ping\ndata: {"type":"ping"}\n\n`);
+        } catch { clearInterval(pingInterval); }
       }, 15_000);
       // Clean up interval on done
       const origDone = done;
@@ -288,6 +291,10 @@ function handleStream(
     });
 
     sub.start(cliInput);
+
+    // Send headers immediately so client knows we're alive
+    // Don't wait for first CLI event (CLI startup takes seconds)
+    ensureHeaders();
   });
 }
 
