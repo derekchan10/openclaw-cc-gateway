@@ -12,7 +12,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import yaml from "js-yaml";
 import { generateApiKey, detectDockerHostIP, discoverInstances } from "./discover.js";
-import { discoverSkills, syncSkills, cleanSkills, listSyncedSkills } from "./skills.js";
+import { discoverSkills, syncSkills, cleanSkills, listSyncedSkills, pushSkills, diffSkills, syncBidirectional, type SyncDirection } from "./skills.js";
 import type { Tenant, Config } from "./config.js";
 
 const CONFIG_PATH = resolve(process.cwd(), "config.yaml");
@@ -314,6 +314,102 @@ function cmdSkillsClean() {
   console.log(`Removed ${removed} synced skills from ${skillsDir}`);
 }
 
+function cmdSkillsPush(tenantName?: string) {
+  const instances = discoverInstances();
+  const raw = loadRawConfig();
+  const skillsDir = (raw.skills as any)?.dir || resolve(process.cwd(), "skills");
+
+  const targets = tenantName
+    ? instances.filter((i) => i.name === tenantName)
+    : instances;
+
+  if (targets.length === 0) {
+    console.error(tenantName ? `No instance "${tenantName}" found.` : "No instances found.");
+    process.exit(1);
+  }
+
+  let totalPushed = 0;
+  for (const inst of targets) {
+    console.log(`\n${inst.name}: pushing skills to OpenClaw...`);
+    const result = pushSkills(inst, skillsDir, inst.name);
+    totalPushed += result.pushed;
+    console.log(`  ✓ ${result.pushed} skills pushed`);
+    if (result.errors.length > 0) {
+      for (const e of result.errors) console.log(`  ⚠ ${e}`);
+    }
+  }
+  console.log(`\nTotal: ${totalPushed} skills pushed`);
+}
+
+function cmdSkillsDiff(tenantName?: string) {
+  const instances = discoverInstances();
+  const raw = loadRawConfig();
+  const skillsDir = (raw.skills as any)?.dir || resolve(process.cwd(), "skills");
+
+  const targets = tenantName
+    ? instances.filter((i) => i.name === tenantName)
+    : instances;
+
+  if (targets.length === 0) {
+    console.error(tenantName ? `No instance "${tenantName}" found.` : "No instances found.");
+    process.exit(1);
+  }
+
+  for (const inst of targets) {
+    const diff = diffSkills(inst, skillsDir, inst.name);
+    console.log(`\n${inst.mode === "docker" ? "🐳" : "💻"} ${inst.name}: local=${diff.localCount} remote=${diff.remoteCount}\n`);
+
+    if (diff.pullOnly.length > 0) {
+      console.log(`  ← Pull (remote only): ${diff.pullOnly.length}`);
+      for (const s of diff.pullOnly.slice(0, 10)) console.log(`    + ${s}`);
+      if (diff.pullOnly.length > 10) console.log(`    ... and ${diff.pullOnly.length - 10} more`);
+    }
+    if (diff.pushOnly.length > 0) {
+      console.log(`  → Push (local only): ${diff.pushOnly.length}`);
+      for (const s of diff.pushOnly.slice(0, 10)) console.log(`    + ${s}`);
+      if (diff.pushOnly.length > 10) console.log(`    ... and ${diff.pushOnly.length - 10} more`);
+    }
+    if (diff.both.length > 0) {
+      console.log(`  = Both: ${diff.both.length}`);
+    }
+    if (diff.pullOnly.length === 0 && diff.pushOnly.length === 0) {
+      console.log("  ✓ In sync");
+    }
+  }
+}
+
+function cmdSkillsBisync(tenantName?: string, direction: SyncDirection = "both") {
+  const instances = discoverInstances();
+  const raw = loadRawConfig();
+  const skillsDir = (raw.skills as any)?.dir || resolve(process.cwd(), "skills");
+
+  const targets = tenantName
+    ? instances.filter((i) => i.name === tenantName)
+    : instances;
+
+  if (targets.length === 0) {
+    console.error(tenantName ? `No instance "${tenantName}" found.` : "No instances found.");
+    process.exit(1);
+  }
+
+  let totalPulled = 0;
+  let totalPushed = 0;
+
+  for (const inst of targets) {
+    console.log(`\n${inst.name}: bidirectional sync (${direction})...`);
+    const result = syncBidirectional(inst, skillsDir, inst.name, direction);
+    totalPulled += result.pulled;
+    totalPushed += result.pushed;
+    console.log(`  ← Pulled: ${result.pulled}  → Pushed: ${result.pushed}`);
+    if (result.errors.length > 0) {
+      for (const e of result.errors) console.log(`  ⚠ ${e}`);
+    }
+  }
+
+  console.log(`\nTotal: pulled=${totalPulled} pushed=${totalPushed}`);
+  if (totalPulled > 0) console.log("Restart the gateway: pm2 restart openclaw-cc-gateway");
+}
+
 // ── Parse args ──
 
 function main() {
@@ -360,18 +456,35 @@ function main() {
         case "list":
           cmdSkillsList(args[2]);
           break;
+        case "pull":
         case "sync":
           cmdSkillsSync(args[2], args.includes("--all"));
           break;
+        case "push":
+          cmdSkillsPush(args[2]);
+          break;
+        case "diff":
+          cmdSkillsDiff(args[2]);
+          break;
+        case "bisync": {
+          const dir = (args.includes("--pull") ? "pull" : args.includes("--push") ? "push" : "both") as SyncDirection;
+          const name = args.find((a, i) => i >= 2 && !a.startsWith("-"));
+          cmdSkillsBisync(name, dir);
+          break;
+        }
         case "clean":
           cmdSkillsClean();
           break;
         default:
           console.log(`Usage:
-  node dist/manage.js skills list [tenant]    List skills from OpenClaw instance
-  node dist/manage.js skills sync [tenant]    Sync skills to local directory
-  node dist/manage.js skills sync --all       Sync from all instances
-  node dist/manage.js skills clean            Remove all synced skills`);
+  node dist/manage.js skills list [tenant]      List skills from OpenClaw instance
+  node dist/manage.js skills pull [tenant]      Pull: OpenClaw → local (alias: sync)
+  node dist/manage.js skills push [tenant]      Push: local → OpenClaw
+  node dist/manage.js skills diff [tenant]      Show diff between local and remote
+  node dist/manage.js skills bisync [tenant]    Bidirectional: pull new + push new
+    --pull                                        Only pull direction
+    --push                                        Only push direction
+  node dist/manage.js skills clean              Remove all synced skills`);
       }
       break;
     }
@@ -393,7 +506,10 @@ Commands:
   apply [name]                  Push gateway config to OpenClaw instance(s)
   gen-key                       Generate a random API key
   skills list [tenant]          List skills from OpenClaw instance(s)
-  skills sync [tenant|--all]    Sync skills to local ./skills/ directory
+  skills pull [tenant]          Pull: OpenClaw → local (alias: sync)
+  skills push [tenant]          Push: local → OpenClaw
+  skills diff [tenant]          Show diff between local and remote
+  skills bisync [tenant]        Bidirectional sync (pull new + push new)
   skills clean                  Remove all synced skills
 
 Examples:

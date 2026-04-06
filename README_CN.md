@@ -100,20 +100,41 @@ npm run manage gen-key
 
 ## Skill 管理
 
-Skill 按**租户隔离**同步 — 每个 OpenClaw 实例有独立的 Skill 目录。CLI 子进程运行时只加载对应租户的 Skill。
+Skill 按**租户隔离**，支持**双向同步** — 每个 OpenClaw 实例有独立的 Skill 目录，可以从容器拉取也可以推送到容器。
 
 ```bash
-# 列出 OpenClaw 实例的 Skill
+# 列出 Skill
 npm run manage skills list               # 所有租户
 npm run manage skills list <名称>        # 单个租户
 
-# 按租户同步 Skill
-npm run manage skills sync               # 所有租户
-npm run manage skills sync <名称>        # 单个租户
+# 拉取：OpenClaw → 本地
+npm run manage skills pull               # 所有租户
+npm run manage skills pull <名称>        # 单个租户
 
-# 清理已同步的 Skill
+# 推送：本地 → OpenClaw
+npm run manage skills push               # 所有租户
+npm run manage skills push <名称>        # 单个租户
+
+# 差异对比
+npm run manage skills diff               # 所有租户
+npm run manage skills diff <名称>        # 单个租户
+
+# 双向同步：拉取远程新增 + 推送本地新增
+npm run manage skills bisync             # 所有租户
+npm run manage skills bisync <名称>      # 单个租户
+
+# 清理
 npm run manage skills clean
 ```
+
+### 同步方向
+
+| 命令 | 方向 | 说明 |
+|------|------|------|
+| `pull` | OpenClaw → 本地 | 从容器下载 Skill 到 `skills/<租户>/` |
+| `push` | 本地 → OpenClaw | 从 `skills/<租户>/` 上传到容器的 `workspace/skills/` |
+| `diff` | — | 显示本地独有、远程独有和共有的 Skill |
+| `bisync` | 双向 | 拉取远程新增 + 推送本地新增（不覆盖已有） |
 
 ### Skill 隔离结构
 

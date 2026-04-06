@@ -100,20 +100,43 @@ The `apply` command updates:
 
 ## Skill Management
 
-Skills are synced **per-tenant** — each OpenClaw instance gets its own isolated skill directory. When a CLI subprocess runs for a tenant, it only loads skills from `skills/<tenant>/`.
+Skills are synced **per-tenant** with bidirectional support — each OpenClaw instance gets its own isolated skill directory. When a CLI subprocess runs for a tenant, it only loads skills from `skills/<tenant>/`.
 
 ```bash
 # List skills from OpenClaw instance(s)
 npm run manage skills list               # all tenants
 npm run manage skills list <name>        # single tenant
 
-# Sync skills per tenant
-npm run manage skills sync               # all tenants
-npm run manage skills sync <name>        # single tenant
+# Pull: OpenClaw → local (download skills from containers)
+npm run manage skills pull               # all tenants
+npm run manage skills pull <name>        # single tenant
+
+# Push: local → OpenClaw (upload skills to containers)
+npm run manage skills push               # all tenants
+npm run manage skills push <name>        # single tenant
+
+# Diff: show what's different between local and remote
+npm run manage skills diff               # all tenants
+npm run manage skills diff <name>        # single tenant
+
+# Bidirectional sync: pull new remote + push new local
+npm run manage skills bisync             # all tenants
+npm run manage skills bisync <name>      # single tenant
+npm run manage skills bisync --pull      # only pull direction
+npm run manage skills bisync --push      # only push direction
 
 # Clean synced skills
 npm run manage skills clean
 ```
+
+### Sync Directions
+
+| Command | Direction | What it does |
+|---------|-----------|-------------|
+| `pull` | OpenClaw → local | Download skills from container to `skills/<tenant>/` |
+| `push` | local → OpenClaw | Upload skills from `skills/<tenant>/` to container's `workspace/skills/` |
+| `diff` | — | Show which skills exist only locally, only remotely, or both |
+| `bisync` | both | Pull new remote skills + push new local skills (no overwrites) |
 
 ### Skill Isolation
 

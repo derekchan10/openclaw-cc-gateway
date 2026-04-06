@@ -1,7 +1,9 @@
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync, mkdirSync, readdirSync, cpSync, rmSync, statSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, readdirSync, cpSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { resolve, basename, dirname, join } from "node:path";
 import type { DiscoveredInstance } from "./discover.js";
+
+export type SyncDirection = "pull" | "push" | "both";
 
 export interface SkillInfo {
   name: string;
@@ -239,7 +241,6 @@ export function listSyncedSkills(targetDir: string, tenantName?: string): string
     });
   }
 
-  // List all tenants and their skill counts
   const results: string[] = [];
   for (const tenant of readdirSync(dir)) {
     const tdir = resolve(dir, tenant);
@@ -251,4 +252,183 @@ export function listSyncedSkills(targetDir: string, tenantName?: string): string
     results.push(`${tenant}: ${skills.length} skills`);
   }
   return results;
+}
+
+// ── Push: local skills → OpenClaw instance ──
+
+/**
+ * Push skills from local per-tenant directory back to an OpenClaw instance.
+ * Only pushes to the workspace/skills/ directory (user-managed, not bundled).
+ */
+export function pushSkills(
+  instance: DiscoveredInstance,
+  skillsDir: string,
+  tenantName: string,
+): { pushed: number; errors: string[] } {
+  const localDir = resolve(skillsDir, tenantName);
+  if (!existsSync(localDir)) return { pushed: 0, errors: ["Local skill dir not found"] };
+
+  const localSkills = readdirSync(localDir).filter((e) => {
+    const p = resolve(localDir, e);
+    return statSync(p).isDirectory() && existsSync(resolve(p, "SKILL.md"));
+  });
+
+  let pushed = 0;
+  const errors: string[] = [];
+
+  // Determine remote target directory
+  const remoteSkillsDir = instance.mode === "docker"
+    ? "/home/node/.openclaw/workspace/skills"
+    : resolve(instance.configDir, "workspace/skills");
+
+  for (const skillName of localSkills) {
+    const src = resolve(localDir, skillName);
+    try {
+      if (instance.mode === "docker") {
+        // Ensure remote dir exists
+        execSync(
+          `docker exec ${instance.container} mkdir -p "${remoteSkillsDir}/${skillName}"`,
+          { timeout: 5000 },
+        );
+        // Copy to container
+        execSync(
+          `docker cp "${src}/." "${instance.container}:${remoteSkillsDir}/${skillName}/"`,
+          { timeout: 10000 },
+        );
+      } else {
+        const dest = resolve(remoteSkillsDir, skillName);
+        mkdirSync(dest, { recursive: true });
+        if (existsSync(dest)) rmSync(dest, { recursive: true });
+        cpSync(src, dest, { recursive: true });
+      }
+      pushed++;
+    } catch (e) {
+      errors.push(`${skillName}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  return { pushed, errors };
+}
+
+// ── Bidirectional sync: diff-based ──
+
+export interface SyncDiff {
+  pullOnly: string[];    // exists in OpenClaw but not locally
+  pushOnly: string[];    // exists locally but not in OpenClaw
+  both: string[];        // exists in both (will be updated by chosen direction)
+  localCount: number;
+  remoteCount: number;
+}
+
+/**
+ * Compute the diff between local skills and OpenClaw instance skills.
+ */
+export function diffSkills(
+  instance: DiscoveredInstance,
+  skillsDir: string,
+  tenantName: string,
+): SyncDiff {
+  // Local skills
+  const localDir = resolve(skillsDir, tenantName);
+  const localSkills = new Set<string>();
+  if (existsSync(localDir)) {
+    for (const e of readdirSync(localDir)) {
+      const p = resolve(localDir, e);
+      if (statSync(p).isDirectory() && existsSync(resolve(p, "SKILL.md"))) {
+        localSkills.add(e);
+      }
+    }
+  }
+
+  // Remote skills
+  const remoteSkills = new Set<string>();
+  const discovered = discoverSkills(instance);
+  for (const s of discovered) {
+    remoteSkills.add(s.name);
+  }
+
+  const pullOnly: string[] = [];
+  const pushOnly: string[] = [];
+  const both: string[] = [];
+
+  for (const name of remoteSkills) {
+    if (localSkills.has(name)) both.push(name);
+    else pullOnly.push(name);
+  }
+  for (const name of localSkills) {
+    if (!remoteSkills.has(name)) pushOnly.push(name);
+  }
+
+  return {
+    pullOnly: pullOnly.sort(),
+    pushOnly: pushOnly.sort(),
+    both: both.sort(),
+    localCount: localSkills.size,
+    remoteCount: remoteSkills.size,
+  };
+}
+
+/**
+ * Bidirectional sync: pull new remote skills, push new local skills.
+ */
+export function syncBidirectional(
+  instance: DiscoveredInstance,
+  skillsDir: string,
+  tenantName: string,
+  direction: SyncDirection = "both",
+): { pulled: number; pushed: number; errors: string[] } {
+  const diff = diffSkills(instance, skillsDir, tenantName);
+  let pulled = 0;
+  let pushed = 0;
+  const errors: string[] = [];
+
+  // Pull: remote → local (new + updated)
+  if (direction === "pull" || direction === "both") {
+    const toPull = direction === "both" ? diff.pullOnly : [...diff.pullOnly, ...diff.both];
+    if (toPull.length > 0) {
+      const remoteSkills = discoverSkills(instance).filter((s) => toPull.includes(s.name));
+      const result = syncSkills(instance, remoteSkills, skillsDir, tenantName);
+      pulled = result.synced;
+      errors.push(...result.errors);
+    }
+  }
+
+  // Push: local → remote (new + updated)
+  if (direction === "push" || direction === "both") {
+    const localDir = resolve(skillsDir, tenantName);
+    if (!existsSync(localDir)) return { pulled, pushed, errors };
+
+    const toPush = direction === "both" ? diff.pushOnly : [...diff.pushOnly, ...diff.both];
+    if (toPush.length > 0) {
+      const remoteSkillsDir = instance.mode === "docker"
+        ? "/home/node/.openclaw/workspace/skills"
+        : resolve(instance.configDir, "workspace/skills");
+
+      for (const skillName of toPush) {
+        const src = resolve(localDir, skillName);
+        if (!existsSync(src)) continue;
+        try {
+          if (instance.mode === "docker") {
+            execSync(
+              `docker exec ${instance.container} mkdir -p "${remoteSkillsDir}/${skillName}"`,
+              { timeout: 5000 },
+            );
+            execSync(
+              `docker cp "${src}/." "${instance.container}:${remoteSkillsDir}/${skillName}/"`,
+              { timeout: 10000 },
+            );
+          } else {
+            const dest = resolve(remoteSkillsDir, skillName);
+            if (existsSync(dest)) rmSync(dest, { recursive: true });
+            cpSync(src, dest, { recursive: true });
+          }
+          pushed++;
+        } catch (e) {
+          errors.push(`push ${skillName}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+  }
+
+  return { pulled, pushed, errors };
 }
