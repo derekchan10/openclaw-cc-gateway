@@ -118,6 +118,8 @@ function handleStream(
       }
     }, 600_000);
 
+    const t0 = Date.now();
+    const ts = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
     console.log(`[${tenantName}] stream: starting CLI (prompt=${cliInput.prompt.length} chars)`);
 
     const tenant = config.tenants.find((t) => t.name === tenantName);
@@ -139,7 +141,7 @@ function handleStream(
     }
 
     res.on("close", () => {
-      console.log(`[${tenantName}] stream: client disconnected`);
+      console.log(`[${tenantName}] stream: client disconnected after ${ts()}`);
       sub.kill();
       done("client-disconnect");
     });
@@ -172,7 +174,8 @@ function handleStream(
           // comment to keep the connection alive (not a named event, so
           // pi-ai SDK's event parser ignores it)
           try {
-            res.write(`: turn ${turnCount} tool_use (buffered)\n\n`);
+            res.write(`: turn ${turnCount} tool_use (buffered) ${ts()}\n\n`);
+            console.log(`[${tenantName}] buffered turn ${turnCount} at ${ts()}`);
           } catch { /* client disconnected */ }
           currentTurn = [];
           lastStopReason = "";
