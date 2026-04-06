@@ -103,23 +103,24 @@ function handleStream(
 ): Promise<void> {
   return new Promise<void>((resolve) => {
     let resolved = false;
-    const done = () => {
+    const done = (reason?: string) => {
       if (resolved) return;
       resolved = true;
       if (safetyTimer) clearTimeout(safetyTimer);
+      console.log(`[${tenantName}] done: ${reason || "unknown"}`);
       resolve();
     };
 
-    // Safety timeout: if nothing resolves within CLI timeout + 30s, force cleanup
+    // Safety timeout: 10 minutes max regardless of CLI timeout
     const safetyTimer = setTimeout(() => {
       if (!resolved) {
-        console.error(`[${tenantName}] Safety timeout reached, forcing cleanup`);
+        console.error(`[${tenantName}] Safety timeout (10min), forcing cleanup`);
         sub.kill();
-        if (currentTurn.length > 0) flushTurn(res, currentTurn);
+        if (!flushed) flushSynthetic("safety timeout");
         if (!res.writableEnded) res.end();
-        done();
+        done("safety-timeout");
       }
-    }, config.cli.timeout + 30_000);
+    }, 600_000);
 
     console.log(`[${tenantName}] stream: starting CLI (prompt=${cliInput.prompt.length} chars)`);
 
@@ -136,7 +137,7 @@ function handleStream(
     res.on("close", () => {
       console.log(`[${tenantName}] stream: client disconnected`);
       sub.kill();
-      done();
+      done('close');
     });
 
     // Buffer events per turn. Each turn starts at message_start, ends at message_stop.
@@ -250,10 +251,11 @@ function handleStream(
       } catch (e) {
         console.error(`[${tenantName}] Error in error handler:`, e);
       }
-      done();
+      done('error');
     });
 
     sub.on("close", (code: number | null) => {
+      console.log(`[${tenantName}] CLI close event: code=${code} flushed=${flushed} resolved=${resolved}`);
       try {
         if (!flushed) {
           if (code !== 0) {
@@ -271,7 +273,7 @@ function handleStream(
       } catch (e) {
         console.error(`[${tenantName}] Error in close handler:`, e);
       }
-      done();
+      done('close');
     });
 
     sub.start(cliInput);
@@ -306,11 +308,11 @@ function handleNonStream(
 ): Promise<void> {
   return new Promise<void>((resolve) => {
     let resolved = false;
-    const done = () => {
+    const done = (reason?: string) => {
       if (resolved) return;
       resolved = true;
       if (safetyTimer) clearTimeout(safetyTimer);
-      resolve();
+      console.log(`[${tenantName}] done(non-stream): ${reason || "unknown"}`); resolve();
     };
 
     const tenant = config.tenants.find((t) => t.name === tenantName);
@@ -329,9 +331,9 @@ function handleNonStream(
         console.error(`[${tenantName}] Safety timeout reached (non-stream), forcing cleanup`);
         sub.kill();
         sendResponse();
-        done();
+        done('close');
       }
-    }, config.cli.timeout + 30_000);
+    }, 600_000);
 
     // Track per-turn state, reset on each message_start
     let contentBlocks: unknown[] = [];
@@ -427,12 +429,12 @@ function handleNonStream(
           error: { type: "api_error", message: err.message },
         });
       }
-      done();
+      done('error');
     });
 
     sub.on("close", () => {
       sendResponse();
-      done();
+      done('close');
     });
 
     sub.start(cliInput);
