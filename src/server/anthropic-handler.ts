@@ -102,7 +102,23 @@ function handleStream(
 ): Promise<void> {
   return new Promise<void>((resolve) => {
     let resolved = false;
-    const done = () => { if (!resolved) { resolved = true; resolve(); } };
+    const done = () => {
+      if (resolved) return;
+      resolved = true;
+      if (safetyTimer) clearTimeout(safetyTimer);
+      resolve();
+    };
+
+    // Safety timeout: if nothing resolves within CLI timeout + 30s, force cleanup
+    const safetyTimer = setTimeout(() => {
+      if (!resolved) {
+        console.error(`[${tenantName}] Safety timeout reached, forcing cleanup`);
+        sub.kill();
+        if (currentTurn.length > 0) flushTurn(res, currentTurn);
+        if (!res.writableEnded) res.end();
+        done();
+      }
+    }, config.cli.timeout + 30_000);
 
     const tenant = config.tenants.find((t) => t.name === tenantName);
     const sub = new ClaudeSubprocess({
@@ -122,17 +138,14 @@ function handleStream(
 
     sub.on("sse", (eventType: string, data: Record<string, unknown>) => {
       if (eventType === "message_start") {
-        // New turn starting — discard previous buffered turn
         currentTurn = [];
       }
 
-      // Patch model name
       if (eventType === "message_start") {
         const msg = data.message as Record<string, unknown> | undefined;
         if (msg) msg.model = requestModel;
       }
 
-      // Track stop reason
       if (eventType === "message_delta") {
         const delta = data.delta as Record<string, unknown> | undefined;
         if (delta?.stop_reason) lastStopReason = delta.stop_reason as string;
@@ -140,14 +153,11 @@ function handleStream(
 
       currentTurn.push({ eventType, data });
 
-      // When message_stop arrives, check if this is a tool_use turn or final turn
       if (eventType === "message_stop") {
         if (lastStopReason === "tool_use") {
-          // Tool turn — CLI will execute the tool and continue. Discard this buffer.
           currentTurn = [];
           lastStopReason = "";
         } else {
-          // Final turn (end_turn / max_tokens) — flush to client
           flushTurn(res, currentTurn);
           currentTurn = [];
         }
@@ -156,7 +166,6 @@ function handleStream(
 
     sub.on("error", (err: Error) => {
       console.error(`[${tenantName}] CLI error:`, err.message);
-      // If we have buffered events from the last turn, flush them first
       if (currentTurn.length > 0) {
         flushTurn(res, currentTurn);
         currentTurn = [];
@@ -170,12 +179,11 @@ function handleStream(
         type: "error",
         error: { type: "api_error", message: err.message },
       })}\n\n`);
-      res.end();
+      if (!res.writableEnded) res.end();
       done();
     });
 
     sub.on("close", () => {
-      // If there are unflushed events (shouldn't happen normally), flush them
       if (currentTurn.length > 0) {
         flushTurn(res, currentTurn);
       }
@@ -210,6 +218,14 @@ function handleNonStream(
   tenantName: string,
 ): Promise<void> {
   return new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => {
+      if (resolved) return;
+      resolved = true;
+      if (safetyTimer) clearTimeout(safetyTimer);
+      resolve();
+    };
+
     const tenant = config.tenants.find((t) => t.name === tenantName);
     const sub = new ClaudeSubprocess({
       bin: config.cli.bin,
@@ -219,6 +235,16 @@ function handleNonStream(
       tenantName,
       skillsDir: config.skills.dir,
     });
+
+    // Safety timeout
+    const safetyTimer = setTimeout(() => {
+      if (!resolved) {
+        console.error(`[${tenantName}] Safety timeout reached (non-stream), forcing cleanup`);
+        sub.kill();
+        sendResponse();
+        done();
+      }
+    }, config.cli.timeout + 30_000);
 
     // Track per-turn state, reset on each message_start
     let contentBlocks: unknown[] = [];
@@ -314,12 +340,12 @@ function handleNonStream(
           error: { type: "api_error", message: err.message },
         });
       }
-      resolve();
+      done();
     });
 
     sub.on("close", () => {
       sendResponse();
-      resolve();
+      done();
     });
 
     sub.start(cliInput);
