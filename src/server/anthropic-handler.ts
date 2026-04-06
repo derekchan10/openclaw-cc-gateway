@@ -172,42 +172,73 @@ function handleStream(
       }
     });
 
-    sub.on("error", (err: Error) => {
-      console.error(`[${tenantName}] CLI error:`, err.message);
-      // If we never flushed a final turn, flush whatever we have
-      if (!flushed) {
-        if (currentTurn.length > 0) {
-          flushTurn(res, currentTurn);
-        } else if (lastCompletedTurn.length > 0) {
-          // Fallback: flush the last tool_use turn so client gets something
-          flushTurn(res, lastCompletedTurn);
+    // Synthesize a complete Anthropic SSE response from accumulated text.
+    // Used when CLI exits abnormally without a proper end_turn sequence.
+    const flushSynthetic = (reason: string) => {
+      if (flushed || res.writableEnded) return;
+
+      // Collect any text from currentTurn or lastCompletedTurn events
+      let text = "";
+      const events = currentTurn.length > 0 ? currentTurn : lastCompletedTurn;
+      for (const { eventType, data } of events) {
+        if (eventType === "content_block_delta") {
+          const delta = data.delta as Record<string, unknown> | undefined;
+          if (delta?.type === "text_delta" && typeof delta.text === "string") {
+            text += delta.text;
+          }
         }
       }
+
+      if (!text) text = `[CLI exited: ${reason}]`;
+
+      // Send a complete synthetic Anthropic SSE sequence
+      const msgId = `msg_${Date.now().toString(36)}`;
       if (!res.headersSent) {
         res.setHeader("Content-Type", "text/event-stream");
         res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Connection", "keep-alive");
         res.flushHeaders();
       }
-      if (!flushed) {
-        res.write(`event: error\ndata: ${JSON.stringify({
-          type: "error",
-          error: { type: "api_error", message: err.message },
-        })}\n\n`);
-      }
+      res.write(`event: message_start\ndata: ${JSON.stringify({
+        type: "message_start",
+        message: { id: msgId, type: "message", role: "assistant", content: [], model: requestModel,
+          stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } },
+      })}\n\n`);
+      res.write(`event: content_block_start\ndata: ${JSON.stringify({
+        type: "content_block_start", index: 0, content_block: { type: "text", text: "" },
+      })}\n\n`);
+      res.write(`event: content_block_delta\ndata: ${JSON.stringify({
+        type: "content_block_delta", index: 0, delta: { type: "text_delta", text },
+      })}\n\n`);
+      res.write(`event: content_block_stop\ndata: ${JSON.stringify({
+        type: "content_block_stop", index: 0,
+      })}\n\n`);
+      res.write(`event: message_delta\ndata: ${JSON.stringify({
+        type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 0 },
+      })}\n\n`);
+      res.write(`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`);
+      flushed = true;
+    };
+
+    sub.on("error", (err: Error) => {
+      console.error(`[${tenantName}] CLI error:`, err.message);
+      if (!flushed) flushSynthetic(err.message);
       if (!res.writableEnded) res.end();
       done();
     });
 
     sub.on("close", (code: number | null) => {
-      // If we never flushed a final turn, flush whatever we have
       if (!flushed) {
-        if (currentTurn.length > 0) {
+        if (code !== 0) {
+          console.warn(`[${tenantName}] CLI exited with code ${code} without final turn`);
+        }
+        // Try to flush a complete turn first, fallback to synthetic
+        if (currentTurn.length > 0 && currentTurn.some(e => e.eventType === "message_stop")) {
           flushTurn(res, currentTurn);
         } else if (lastCompletedTurn.length > 0) {
           flushTurn(res, lastCompletedTurn);
-        }
-        if (!flushed && code !== 0) {
-          console.warn(`[${tenantName}] CLI exited with code ${code} without final turn`);
+        } else {
+          flushSynthetic(`exit code ${code}`);
         }
       }
       if (!res.writableEnded) res.end();
